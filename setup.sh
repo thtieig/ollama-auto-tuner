@@ -1,140 +1,225 @@
 #!/bin/bash
 set -e
 
-# =================================================================
-#        Ollama CPU Auto-Tuner :: Setup Script
-# =================================================================
+# =====================================================================
+#        Ollama CPU Auto-Tuner v2 :: Setup Script (Improved)
+# =====================================================================
 # This script installs and configures the auto-tuner service.
-# It should be run with root privileges (e.g., sudo bash setup.sh).
-# =================================================================
+# Designed for CPU-only Ollama deployments with dynamic scaling.
+# Run with root privileges: sudo bash setup.sh
+# =====================================================================
 
-# --- Check for Root Privileges ---
+# Check for root privileges
 if [[ "$EUID" -ne 0 ]]; then
-  echo "❌ This script must be run as root. Please use sudo."
+  echo "✗ This script must be run as root. Please use sudo."
   exit 1
 fi
 
-echo "🚀 Starting Ollama CPU Auto-Tuner Setup..."
+echo "🚀 Starting Ollama CPU Auto-Tuner v2 Setup..."
 
-# --- 1. Install Dependencies ---
+# =====================================================================
+# 1. Install Dependencies
+# =====================================================================
 echo "📦 Checking for dependencies (wget, yq)..."
 if ! command -v wget &> /dev/null; then
     echo "   - wget not found. Installing..."
-    apt-get update && apt-get install -y wget
+    apt-get update && apt-get install -y wget > /dev/null 2>&1
 fi
 if ! command -v yq &> /dev/null; then
     echo "   - yq not found. Installing..."
-    wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq && chmod +x /usr/bin/yq
+    wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq && chmod +x /usr/bin/yq
 fi
-echo "✅ Dependencies are satisfied."
+echo "✅ Dependencies satisfied."
 
-# --- 2. Create the Autotune Script ---
-echo "✍️  Creating auto-tune script at /usr/local/bin/ollama-autotune.sh..."
-cat > /usr/local/bin/ollama-autotune.sh << 'EOF'
+# =====================================================================
+# 2. Create the Autotune Script (Improved Logic)
+# =====================================================================
+echo "✏️  Creating improved auto-tune script..."
+cat > /usr/local/bin/ollama-autotune.sh << 'EOFSCRIPT'
 #!/bin/bash
 set -eo pipefail
-
-# --- Ollama Autotune Script (YAML Version) ---
-# This script calculates optimal settings and writes them to a YAML config file.
 
 CONFIG_FILE="/etc/default/ollama-autotune.conf"
 OLLAMA_CONFIG_YAML="/etc/ollama/config.yaml"
 
-# Load the tuning strategy
+# Load configuration
 if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "ERROR: Autotune config file not found at $CONFIG_FILE" >&2
+    echo "ERROR: Config not found at $CONFIG_FILE" >&2
     exit 1
 fi
 source "$CONFIG_FILE"
-FINAL_MODE="${MODE:-safe}"
 
-# --- Parameter Calculation ---
-echo "⚖️  Calculating parameters for mode: $FINAL_MODE"
-TOTAL_PHYSICAL_CORES=$(( $(lscpu | grep 'Core(s) per socket:' | awk '{print $4}') * $(lscpu | grep 'Socket(s):' | awk '{print $2}') ))
+# Get system info
+PHYSICAL_CORES=$(lscpu | grep '^Core(s) per socket:' | awk '{print $4}')
+SOCKETS=$(lscpu | grep '^Socket(s):' | awk '{print $2}')
+TOTAL_PHYSICAL_CORES=$((PHYSICAL_CORES * SOCKETS))
 LOGICAL_CORES=$(nproc)
+
+echo "System Info: $TOTAL_PHYSICAL_CORES physical cores, $LOGICAL_CORES logical cores"
+
+# ===================================================================
+# Calculate optimal parameters based on MODE
+# ===================================================================
+
+FINAL_MODE="${MODE:-safe}"
+echo "Mode: $FINAL_MODE"
 
 case "$FINAL_MODE" in
   safe)
-    OS_HEADROOM=${SAFE_OS_HEADROOM:-2}
-    CORES_PER_INFERENCE=${SAFE_CORES_PER_INFERENCE:-4}
-    TIMEOUT=${SAFE_TIMEOUT:-90s}
-    AVAILABLE_CORES=$((TOTAL_PHYSICAL_CORES - OS_HEADROOM))
+    # Conservative: good for general workloads, stability over speed
+    OS_HEADROOM=4
+    NUM_THREAD=$((TOTAL_PHYSICAL_CORES / 4))  # Each inference gets ~4 cores
+    NUM_PARALLEL=$((TOTAL_PHYSICAL_CORES / NUM_THREAD))
+    BATCH_SIZE=256
+    TIMEOUT=120
     ;;
+  
+  balanced)
+    # Moderate: balance between throughput and stability
+    OS_HEADROOM=3
+    NUM_THREAD=$((TOTAL_PHYSICAL_CORES / 6))  # Each inference gets ~2-3 cores
+    NUM_PARALLEL=$((TOTAL_PHYSICAL_CORES / NUM_THREAD))
+    BATCH_SIZE=512
+    TIMEOUT=120
+    ;;
+  
   aggressive)
-    OS_HEADROOM=${AGGRESSIVE_OS_HEADROOM:-2}
-    CORES_PER_INFERENCE=${AGGRESSIVE_CORES_PER_INFERENCE:-2}
-    TIMEOUT=${AGGRESSIVE_TIMEOUT:-120s}
-    AVAILABLE_CORES=$((LOGICAL_CORES - OS_HEADROOM))
+    # Aggressive: maximize throughput, accept occasional timeouts
+    OS_HEADROOM=2
+    NUM_THREAD=$((TOTAL_PHYSICAL_CORES / 8))  # Each inference gets ~1-2 cores
+    NUM_PARALLEL=$((TOTAL_PHYSICAL_CORES / NUM_THREAD))
+    BATCH_SIZE=1024
+    TIMEOUT=180
     ;;
-  *) echo "❌ Error: Invalid mode '$FINAL_MODE'."; exit 1;;
+  
+  *)
+    echo "ERROR: Invalid mode '$FINAL_MODE'. Use: safe, balanced, or aggressive" >&2
+    exit 1
+    ;;
 esac
-WORKERS=$((AVAILABLE_CORES / CORES_PER_INFERENCE)); if [[ "$WORKERS" -lt 1 ]]; then WORKERS=1; fi
-TIMEOUT_SECONDS=${TIMEOUT%s} # Remove 's' for YAML
 
-# --- Apply Configuration to YAML using yq ---
-echo "✍️  Applying configuration to $OLLAMA_CONFIG_YAML..."
+# Ensure minimum values
+[[ $NUM_THREAD -lt 1 ]] && NUM_THREAD=1
+[[ $NUM_PARALLEL -lt 1 ]] && NUM_PARALLEL=1
+[[ $NUM_THREAD -gt $TOTAL_PHYSICAL_CORES ]] && NUM_THREAD=$TOTAL_PHYSICAL_CORES
+[[ $NUM_PARALLEL -gt $TOTAL_PHYSICAL_CORES ]] && NUM_PARALLEL=$TOTAL_PHYSICAL_CORES
+
+# ===================================================================
+# Calculate total threads to leave OS headroom
+# ===================================================================
+THREADS=$((TOTAL_PHYSICAL_CORES - OS_HEADROOM))
+[[ $THREADS -lt 1 ]] && THREADS=1
+
+# ===================================================================
+# Display calculated parameters
+# ===================================================================
+cat << EOF
+╔═══════════════════════════════════════════════════════════════╗
+║         Calculated Ollama Configuration (Mode: $FINAL_MODE)        ║
+╠═══════════════════════════════════════════════════════════════╣
+║ Physical Cores:        $TOTAL_PHYSICAL_CORES
+║ OS Headroom:           $OS_HEADROOM cores
+║ Ollama Threads:        $THREADS cores (total)
+║ Thread per Inference:  $NUM_THREAD cores
+║ Parallel Inferences:   $NUM_PARALLEL concurrent
+║ Batch Size:            $BATCH_SIZE
+║ Request Timeout:       ${TIMEOUT}s
+╚═══════════════════════════════════════════════════════════════╝
+EOF
+
+# ===================================================================
+# Apply configuration using yq
+# ===================================================================
+echo "✏️  Applying configuration to $OLLAMA_CONFIG_YAML..."
 mkdir -p "$(dirname "$OLLAMA_CONFIG_YAML")"
 touch "$OLLAMA_CONFIG_YAML"
 
-yq -i ".num_parallel = $WORKERS" "$OLLAMA_CONFIG_YAML"
-yq -i ".num_thread = $CORES_PER_INFERENCE" "$OLLAMA_CONFIG_YAML"
-yq -i ".timeout = $TIMEOUT_SECONDS" "$OLLAMA_CONFIG_YAML"
+# Set all parameters atomically
+yq -i ".threads = $THREADS" "$OLLAMA_CONFIG_YAML"
+yq -i ".num_thread = $NUM_THREAD" "$OLLAMA_CONFIG_YAML"
+yq -i ".num_parallel = $NUM_PARALLEL" "$OLLAMA_CONFIG_YAML"
+yq -i ".batch_size = $BATCH_SIZE" "$OLLAMA_CONFIG_YAML"
+yq -i ".timeout = $TIMEOUT" "$OLLAMA_CONFIG_YAML"
+yq -i ".mmap = true" "$OLLAMA_CONFIG_YAML"
 
-echo "✅ Ollama config updated. The service will use these settings on start."
-EOF
+echo "✅ Configuration applied."
+echo ""
+echo "Current config.yaml:"
+cat "$OLLAMA_CONFIG_YAML"
+EOFSCRIPT
 
-# Set permissions for the script
 chmod +x /usr/local/bin/ollama-autotune.sh
 echo "✅ Auto-tune script created."
 
-# --- 3. Create the Default Configuration ("Recipe") ---
-echo "✍️  Creating configuration file at /etc/default/ollama-autotune.conf..."
-cat > /etc/default/ollama-autotune.conf << 'EOF'
-# --- Default Configuration for Ollama Autotune ---
-# This file contains the strategic rules for the auto-tuner.
+# =====================================================================
+# 3. Create Configuration File (Recipe)
+# =====================================================================
+echo "✏️  Creating configuration at /etc/default/ollama-autotune.conf..."
+cat > /etc/default/ollama-autotune.conf << 'EOFCONF'
+# =====================================================================
+# Ollama Auto-Tuner Configuration
+# =====================================================================
+# This file controls how Ollama is tuned for your hardware.
+#
+# MODES:
+#   safe      - Conservative settings, suitable for stable production
+#   balanced  - Good balance between throughput and reliability
+#   aggressive - Maximize throughput, accept potential instability
+#
+# Edit MODE to change tuning strategy, then restart Ollama:
+#   sudo systemctl restart ollama
+# =====================================================================
 
-# Set the default mode: "safe" or "aggressive"
-MODE="safe"
+MODE="balanced"
+EOFCONF
+echo "✅ Configuration created."
 
-# --- Safe Mode Settings (Physical Cores) ---
-SAFE_OS_HEADROOM=2            # Cores to reserve for the OS
-SAFE_CORES_PER_INFERENCE=4    # Cores to assign to a single inference
-SAFE_TIMEOUT=90s              # Max time per request
-
-# --- Aggressive Mode Settings (Logical Cores) ---
-AGGRESSIVE_OS_HEADROOM=2      # Cores to reserve for the OS
-AGGRESSIVE_CORES_PER_INFERENCE=2 # Cores to assign to a single inference
-AGGRESSIVE_TIMEOUT=120s         # Longer timeout for high contention
-EOF
-echo "✅ Default configuration created."
-
-# --- 4. Create the Systemd Drop-In File ---
-echo "✍️  Creating systemd drop-in at /etc/systemd/system/ollama.service.d/10-autotune.conf..."
+# =====================================================================
+# 4. Create Systemd Drop-In
+# =====================================================================
+echo "✏️  Creating systemd drop-in..."
 mkdir -p /etc/systemd/system/ollama.service.d
-cat > /etc/systemd/system/ollama.service.d/10-autotune.conf << 'EOF'
+cat > /etc/systemd/system/ollama.service.d/10-autotune.conf << 'EOFDROP'
 [Service]
-# Point Ollama to the config file we are managing
 Environment="OLLAMA_CONFIG=/etc/ollama/config.yaml"
-
-# Increase process priority
 Nice=-5
 
-# Run the autotune script as root before starting
+# Run autotune before starting Ollama
 ExecStartPre=+/usr/local/bin/ollama-autotune.sh
-EOF
+EOFDROP
 echo "✅ Systemd drop-in created."
 
-# --- 5. Protect Against Installer Overwrites ---
-echo "🛡️  Protecting systemd configuration from installer overwrites..."
-# Remove any existing file and create a symlink to /dev/null
-rm -f /etc/systemd/system/ollama.service
-ln -s /dev/null /etc/systemd/system/ollama.service
-echo "✅ Protection enabled."
+# =====================================================================
+# 5. Ensure Service is Not Masked
+# =====================================================================
+echo "🛡️  Unmask ollama.service if previously masked..."
+systemctl unmask ollama.service 2>/dev/null || true
+echo "✅ Service unmask complete."
 
-# --- 6. Finalizing Setup ---
-echo "🔄 Reloading systemd and restarting Ollama..."
+# =====================================================================
+# 6. Apply and Start
+# =====================================================================
+echo "🔄 Reloading systemd daemon..."
 systemctl daemon-reload
+
+echo "🔄 Restarting Ollama with auto-tuned settings..."
 systemctl restart ollama
 
-echo "🎉 All done! Ollama is now running with auto-tuned settings."
-echo "   To change the tuning strategy, edit /etc/default/ollama-autotune.conf"
+# Wait for Ollama to stabilise
+sleep 3
+
+# Show status
+echo ""
+echo "🎉 Setup complete!"
+echo ""
+echo "Ollama status:"
+systemctl status ollama --no-pager || true
+echo ""
+echo "📋 Current configuration (/etc/ollama/config.yaml):"
+cat /etc/ollama/config.yaml
+echo ""
+echo "💡 Tips:"
+echo "   - To change tuning mode, edit: /etc/default/ollama-autotune.conf"
+echo "   - Then restart: sudo systemctl restart ollama"
+echo "   - View logs: sudo journalctl -u ollama -f"
+echo "   - Available modes: safe, balanced, aggressive"
