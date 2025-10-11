@@ -15,6 +15,16 @@ if [[ "$EUID" -ne 0 ]]; then
   exit 1
 fi
 
+# Check for Ollama installation
+echo "🔍 Checking if Ollama is installed..."
+if ! command -v ollama &> /dev/null; then
+  echo "✗ Ollama not found."
+  echo "   This script requires Ollama to be installed first."
+  echo "   Install Ollama with: curl -fsSL https://ollama.ai/install.sh | sh"
+  exit 1
+fi
+echo "✅ Ollama found."
+
 echo "🚀 Starting Ollama CPU Auto-Tuner v2 Setup..."
 
 # =====================================================================
@@ -175,7 +185,35 @@ EOFCONF
 echo "✅ Configuration created."
 
 # =====================================================================
-# 4. Create Systemd Drop-In
+# 4. Ensure Service File Location
+# =====================================================================
+echo "📁 Ensuring ollama.service is in the correct location..."
+if [ -f /etc/systemd/system/ollama.service ]; then
+    echo "   - Found service file in /etc/systemd/system/, moving to standard location..."
+    mv /etc/systemd/system/ollama.service /usr/lib/systemd/system/ollama.service
+elif [ ! -f /usr/lib/systemd/system/ollama.service ]; then
+    echo "   - Creating service file..."
+    cat > /usr/lib/systemd/system/ollama.service << 'SERVICE_EOF'
+[Unit]
+Description=Ollama Service
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/ollama serve
+User=ollama
+Group=ollama
+Restart=always
+RestartSec=3
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+
+[Install]
+WantedBy=default.target
+SERVICE_EOF
+fi
+echo "✅ Service file location confirmed."
+
+# =====================================================================
+# 5. Create Systemd Drop-In
 # =====================================================================
 echo "✏️  Creating systemd drop-in..."
 mkdir -p /etc/systemd/system/ollama.service.d
@@ -190,14 +228,14 @@ EOFDROP
 echo "✅ Systemd drop-in created."
 
 # =====================================================================
-# 5. Ensure Service is Not Masked
+# 6. Ensure Service is Not Masked
 # =====================================================================
 echo "🛡️  Unmask ollama.service if previously masked..."
 systemctl unmask ollama.service 2>/dev/null || true
 echo "✅ Service unmask complete."
 
 # =====================================================================
-# 6. Apply and Start
+# 7. Apply and Start
 # =====================================================================
 echo "🔄 Reloading systemd daemon..."
 systemctl daemon-reload

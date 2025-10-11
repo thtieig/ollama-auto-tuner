@@ -13,7 +13,8 @@ A set of scripts to automatically configure Ollama's performance parameters (`nu
 ## Prerequisites
 
 - A server running a Debian-based OS (like Ubuntu).
-- **Ollama must be installed first.** You can install it via `curl -fsSL https://ollama.com/install.sh | sh`.
+- **Ollama must be installed first.** You can install it via `curl -fsSL https://ollama.ai/install.sh | sh`.
+- The setup script will verify Ollama installation and provide installation instructions if needed.
 - Root or `sudo` access.
 
 ## Installation
@@ -51,6 +52,4 @@ sudo systemctl restart ollama
 
 ## The Upgrade Process
 
-The Ollama install.sh script has a non-standard behavior of writing its service file to /etc/systemd/system/ollama.service. This would normally override our setup.
-
-To prevent this, the setup.sh script creates a symbolic link from that location to /dev/null, effectively blocking the installer from overwriting our configuration and ensuring your tuned setup is safe during upgrades.
+The Ollama install.sh script may place the systemd service file in /etc/systemd/system/ollama.service, which could conflict with custom configurations. The setup script handles this by relocating any existing service file to the standard /usr/lib/systemd/system/ location and ensuring our drop-in configuration takes precedence. This prevents configuration conflicts during upgrades while maintaining automatic tuning functionality.
