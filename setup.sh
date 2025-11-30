@@ -2,12 +2,14 @@
 set -e
 
 # =====================================================================
-#        Ollama CPU Auto-Tuner v2 :: Setup Script (Improved)
+#        Ollama CPU Auto-Tuner :: Setup Script
 # =====================================================================
 # This script installs and configures the auto-tuner service.
 # Designed for CPU-only Ollama deployments with dynamic scaling.
 # Run with root privileges: sudo bash setup.sh
 # =====================================================================
+
+VERSION="2.1.0"
 
 # Check for root privileges
 if [[ "$EUID" -ne 0 ]]; then
@@ -20,12 +22,22 @@ echo "🔍 Checking if Ollama is installed..."
 if ! command -v ollama &> /dev/null; then
   echo "✗ Ollama not found."
   echo "   This script requires Ollama to be installed first."
-  echo "   Install Ollama with: curl -fsSL https://ollama.ai/install.sh | sh"
-  exit 1
+  echo ""
+  read -p "   Do you want to automatically install it? (y/n): " -n 1 -r
+  echo ""
+  if [[ $REPLY =~ ^[Yy]$ ]]; then
+    echo "📥 Installing Ollama..."
+    curl -fsSL https://ollama.ai/install.sh | sh
+    echo "✓ Ollama installation complete."
+  else
+    echo "   Install Ollama manually with: curl -fsSL https://ollama.ai/install.sh | sh"
+    echo "   Then restart this script."
+    exit 1
+  fi
 fi
-echo "✅ Ollama found."
+echo "✓ Ollama found."
 
-echo "🚀 Starting Ollama CPU Auto-Tuner v2 Setup..."
+echo ">> Starting Ollama CPU Auto-Tuner Setup (v${VERSION})..."
 
 # =====================================================================
 # 1. Install Dependencies
@@ -39,7 +51,7 @@ if ! command -v yq &> /dev/null; then
     echo "   - yq not found. Installing..."
     wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq && chmod +x /usr/bin/yq
 fi
-echo "✅ Dependencies satisfied."
+echo "✓ Dependencies satisfied."
 
 # =====================================================================
 # 2. Create the Autotune Script (Improved Logic)
@@ -159,7 +171,7 @@ cat "$OLLAMA_CONFIG_YAML"
 EOFSCRIPT
 
 chmod +x /usr/local/bin/ollama-autotune.sh
-echo "✅ Auto-tune script created."
+echo "✓ Auto-tune script created."
 
 # =====================================================================
 # 3. Create Configuration File (Recipe)
@@ -182,12 +194,12 @@ cat > /etc/default/ollama-autotune.conf << 'EOFCONF'
 
 MODE="balanced"
 EOFCONF
-echo "✅ Configuration created."
+echo "✓ Configuration created."
 
 # =====================================================================
 # 4. Ensure Service File Location
 # =====================================================================
-echo "📁 Ensuring ollama.service is in the correct location..."
+echo ">> Ensuring ollama.service is in the correct location..."
 if [ -f /etc/systemd/system/ollama.service ]; then
     echo "   - Found service file in /etc/systemd/system/, moving to standard location..."
     mv /etc/systemd/system/ollama.service /usr/lib/systemd/system/ollama.service
@@ -210,7 +222,7 @@ Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/
 WantedBy=default.target
 SERVICE_EOF
 fi
-echo "✅ Service file location confirmed."
+echo "✓ Service file location confirmed."
 
 # =====================================================================
 # 5. Create Systemd Drop-In
@@ -225,22 +237,22 @@ Nice=-5
 # Run autotune before starting Ollama
 ExecStartPre=+/usr/local/bin/ollama-autotune.sh
 EOFDROP
-echo "✅ Systemd drop-in created."
+echo "✓ Systemd drop-in created."
 
 # =====================================================================
 # 6. Ensure Service is Not Masked
 # =====================================================================
 echo "🛡️  Unmask ollama.service if previously masked..."
 systemctl unmask ollama.service 2>/dev/null || true
-echo "✅ Service unmask complete."
+echo "✓ Service unmask complete."
 
 # =====================================================================
 # 7. Apply and Start
 # =====================================================================
-echo "🔄 Reloading systemd daemon..."
+echo ">> Reloading systemd daemon..."
 systemctl daemon-reload
 
-echo "🔄 Restarting Ollama with auto-tuned settings..."
+echo ">> Restarting Ollama with auto-tuned settings..."
 systemctl restart ollama
 
 # Wait for Ollama to stabilise
@@ -248,7 +260,7 @@ sleep 3
 
 # Show status
 echo ""
-echo "🎉 Setup complete!"
+echo "** Setup complete! **"
 echo ""
 echo "Ollama status:"
 systemctl status ollama --no-pager || true
