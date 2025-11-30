@@ -13,8 +13,7 @@ A set of scripts to automatically configure Ollama's performance parameters (`nu
 ## Prerequisites
 
 - A server running a Debian-based OS (like Ubuntu).
-- **Ollama must be installed first.** You can install it via `curl -fsSL https://ollama.ai/install.sh | sh`.
-- The setup script will verify Ollama installation and provide installation instructions if needed.
+- **Ollama installation:** The setup script will check if Ollama is installed and offer to install it automatically if needed.
 - Root or `sudo` access.
 
 ## Installation
